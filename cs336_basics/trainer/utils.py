@@ -1,0 +1,1 @@
+# 在这里写cross entropy, adamW, learning rate scheduler, get batch和gradient clipping
