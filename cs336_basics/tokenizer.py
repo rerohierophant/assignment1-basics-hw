@@ -1,6 +1,10 @@
 import json
 import re
+import regex
 from typing import Dict, List, Tuple, Iterator, Iterable, Union, Optional, IO
+from collections import Counter
+
+GPT2_SPLIT_PATTERN = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
 
 class Tokenizer:
@@ -109,27 +113,28 @@ class Tokenizer:
         Returns:
             预token列表
         """
+        tokens = []
         if self.special_token_regex:
             # 使用正则表达式分割，保留特殊 token
-            parts = self.special_token_regex.split(text)
-            tokens = []
             last_end = 0
             for match in self.special_token_regex.finditer(text):
                 start, end = match.span()
                 # 添加特殊 token 之前的部分
                 if start > last_end:
-                    tokens.append(text[last_end:start])
+                    chunk = text[last_end:start]
+                    tokens.extend(regex.findall(GPT2_SPLIT_PATTERN, chunk))
                 # 添加特殊 token
                 tokens.append(match.group(0))
                 last_end = end
             # 添加最后的部分
             if last_end < len(text):
-                tokens.append(text[last_end:])
-            
-            # 过滤空字符串
-            tokens = [t for t in tokens if t]
+                chunk = text[last_end:]
+                tokens.extend(regex.findall(GPT2_SPLIT_PATTERN, chunk))
         else:
-            tokens = [text]
+            tokens = regex.findall(GPT2_SPLIT_PATTERN, text)
+        
+        # 过滤空字符串
+        tokens = [t for t in tokens if t]
         
         return tokens
     
@@ -247,3 +252,121 @@ class Tokenizer:
         except UnicodeDecodeError:
             # 使用替换字符处理错误
             return byte_sequence.decode('utf-8', errors='replace')
+
+
+def train_bpe(
+    input_path: str, 
+    vocab_size: int, 
+    special_tokens: List[str]
+) -> Tuple[Dict[int, bytes], List[Tuple[bytes, bytes]]]:
+    """
+    Train a BPE tokenizer on a text file.
+    
+    Args:
+        input_path: Path to the training text file.
+        vocab_size: Target vocabulary size.
+        special_tokens: List of special tokens.
+        
+    Returns:
+        Tuple of (vocab, merges).
+    """
+    try:
+        from tqdm import tqdm
+    except ImportError:
+        tqdm = lambda x: x
+
+    # 1. Read Data
+    with open(input_path, 'r', encoding='utf-8') as f:
+        text = f.read()
+
+    # 2. Pre-tokenize
+    special_token_regex = None
+    if special_tokens:
+        escaped = [re.escape(t) for t in special_tokens]
+        escaped.sort(key=len, reverse=True)
+        special_token_regex = re.compile('|'.join(escaped))
+
+    words = []
+    if special_token_regex:
+        last_end = 0
+        for match in special_token_regex.finditer(text):
+            start, end = match.span()
+            if start > last_end:
+                chunk = text[last_end:start]
+                words.extend(regex.findall(GPT2_SPLIT_PATTERN, chunk))
+            last_end = end
+        if last_end < len(text):
+            chunk = text[last_end:]
+            words.extend(regex.findall(GPT2_SPLIT_PATTERN, chunk))
+    else:
+        words = regex.findall(GPT2_SPLIT_PATTERN, text)
+    
+    # 3. Count word frequencies
+    # Convert words to bytes for consistency
+    words_bytes = [w.encode('utf-8') for w in words]
+    word_counts = Counter(words_bytes)
+
+    # 4. Initial vocab
+    # Start with all 256 bytes
+    vocab = {i: bytes([i]) for i in range(256)}
+    # Add special tokens
+    next_id = 256
+    for st in special_tokens:
+        st_bytes = st.encode('utf-8')
+        # Check if special token is already in vocab (unlikely for bytes 0-255 unless 1 char)
+        if st_bytes not in vocab.values():
+            vocab[next_id] = st_bytes
+            next_id += 1
+            
+    # 5. Prepare split words
+    # {word_bytes: [b'w', b'o', b'r', b'd']}
+    split_words = {wb: [bytes([b]) for b in wb] for wb in word_counts}
+    
+    merges = []
+    
+    # 6. Merge loop
+    pbar = tqdm(total=vocab_size - len(vocab))
+    while len(vocab) < vocab_size:
+        pairs = {}
+        for wb, count in word_counts.items():
+            split = split_words[wb]
+            if len(split) < 2:
+                continue
+            for i in range(len(split) - 1):
+                pair = (split[i], split[i+1])
+                pairs[pair] = pairs.get(pair, 0) + count
+        
+        if not pairs:
+            break
+            
+        best_pair = max(pairs, key=pairs.get)
+        
+        # Add to merges
+        merges.append(best_pair)
+        
+        # Add to vocab
+        new_token = best_pair[0] + best_pair[1]
+        vocab[next_id] = new_token
+        next_id += 1
+        
+        # Update split_words
+        for wb in split_words:
+            split = split_words[wb]
+            if len(split) < 2:
+                continue
+            
+            new_split = []
+            i = 0
+            while i < len(split):
+                if i < len(split) - 1 and split[i] == best_pair[0] and split[i+1] == best_pair[1]:
+                    new_split.append(new_token)
+                    i += 2
+                else:
+                    new_split.append(split[i])
+                    i += 1
+            split_words[wb] = new_split
+            
+        pbar.update(1)
+    pbar.close()
+            
+    return vocab, merges
