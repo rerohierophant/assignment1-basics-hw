@@ -99,7 +99,7 @@ class SwiGLU(nn.Module):
     def forward(self, x: torch.Tensor):
         # x: (batch, seq_len, d_model)
         # SwiGLU(x) = (xW1 ⊙ SiLU(xW2)) W3
-        return self.w2(self.w1(x) * self.silu(self.w2(x))) 
+        return self.w3(self.w1(x) * self.silu(self.w2(x))) 
 
 
 # Scaled Dot-Product Attention 函数（非类，方便复用）

@@ -7,6 +7,36 @@ from collections import Counter
 GPT2_SPLIT_PATTERN = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
 
+from functools import lru_cache
+
+@lru_cache()
+def bytes_to_unicode() -> Dict[int, str]:
+    """
+    Returns list of utf-8 byte and a corresponding list of unicode strings.
+    The reversible bpe codes work on unicode strings.
+    This means you need a large # of unicode characters in your vocab if you want to avoid UNKs.
+    When you're at something like a 10B token dataset you end up needing around 5K for decent coverage.
+    This is a significant percentage of your normal, say, 32K bpe vocab.
+    To avoid that, we want lookup tables between utf-8 bytes and unicode strings.
+    """
+    bs = list(range(ord("!"), ord("~") + 1)) + list(range(ord("¡"), ord("¬") + 1)) + list(range(ord("®"), ord("ÿ") + 1))
+    cs = bs[:]
+    n = 0
+    for b in range(2**8):
+        if b not in bs:
+            bs.append(b)
+            cs.append(2**8 + n)
+            n += 1
+    cs = [chr(n) for n in cs]
+    return dict(zip(bs, cs))
+
+def get_byte_encoder() -> Dict[int, str]:
+    return bytes_to_unicode()
+
+def get_byte_decoder() -> Dict[str, int]:
+    return {v: k for k, v in bytes_to_unicode().items()}
+
+
 class Tokenizer:
     """
     BPE (Byte-Pair Encoding) Tokenizer 实现
@@ -54,10 +84,15 @@ class Tokenizer:
         
         # 构建 merges 映射 { (token1, token2) -> token_id }
         self.merge_dict = {}
-        for token1, token2 in self.merges:
+        self.ranks = {}  # 缓存合并规则的优先级
+        for i, (token1, token2) in enumerate(self.merges):
+            self.ranks[(token1, token2)] = i
             merged_token = token1 + token2
             if merged_token in self.vocab_r:
                 self.merge_dict[(token1, token2)] = self.vocab_r[merged_token]
+        
+        # 缓存已编码的词
+        self.cache = {}
         
         # 预编译特殊 token 正则表达式
         if self.special_tokens:
@@ -83,13 +118,29 @@ class Tokenizer:
             merges_filepath: 合并规则文件路径 (txt 格式)
             special_tokens: 特殊 token 列表
         """
+        # 准备 decoder
+        byte_decoder = get_byte_decoder()
+        
+        def unicode_to_bytes(s: str) -> bytes:
+            # 对于不在映射表中的字符（可能是特殊token或其他），尝试用 utf-8 编码
+            # 但对于 BPE 词表中的项，它们应该都在映射表中
+            return bytes([byte_decoder[c] for c in s])
+
         # 读取词汇表
         with open(vocab_filepath, 'r', encoding='utf-8') as f:
             vocab_data = json.load(f)
         
         # 转换为 {id: bytes}
-        vocab = {int(k): v.encode('utf-8') if isinstance(v, str) else v 
-                 for k, v in vocab_data.items()}
+        vocab = {}
+        for k, v in vocab_data.items():
+            if isinstance(v, str):
+                try:
+                    vocab[int(k)] = unicode_to_bytes(v)
+                except KeyError:
+                    # Fallback: 如果映射表中没有，可能是特殊字符或者旧格式，尝试 utf-8
+                    vocab[int(k)] = v.encode('utf-8')
+            else:
+                vocab[int(k)] = v
         
         # 读取合并规则
         merges = []
@@ -99,9 +150,12 @@ class Tokenizer:
                 if line and not line.startswith('#'):
                     parts = line.split(' ', 1)
                     if len(parts) == 2:
-                        token1, token2 = parts
-                        merges.append((token1.encode('utf-8'), token2.encode('utf-8')))
-        
+                        try:
+                            merges.append((unicode_to_bytes(parts[0]), unicode_to_bytes(parts[1])))
+                        except KeyError:
+                             # Fallback
+                            merges.append((parts[0].encode('utf-8'), parts[1].encode('utf-8')))
+                            
         return cls(vocab, merges, special_tokens)
     
     def _pretokenize(self, text: str) -> List[str]:
@@ -148,7 +202,7 @@ class Tokenizer:
             token ID 列表
         """
         # 将字节序列转换为初始 token 序列（每个字节作为一个 token）
-        tokens = list(text_bytes)
+        tokens = [bytes([b]) for b in text_bytes]
         
         # 应用合并规则
         while len(tokens) > 1:
@@ -157,36 +211,29 @@ class Tokenizer:
             best_score = float('inf')
             
             for i in range(len(tokens) - 1):
-                token1 = bytes([tokens[i]])
-                token2 = bytes([tokens[i + 1]])
+                token1 = tokens[i]
+                token2 = tokens[i + 1]
                 
-                # 检查这对是否在合并规则中
-                if (token1, token2) in self.merge_dict:
-                    # 使用合并规则的索引作为优先级（越早训练的合并规则优先级越高）
-                    merge_idx = -1
-                    for idx, (m1, m2) in enumerate(self.merges):
-                        if m1 == token1 and m2 == token2:
-                            merge_idx = idx
-                            break
-                    
-                    if merge_idx != -1 and merge_idx < best_score:
-                        best_idx = i
-                        best_score = merge_idx
+                # Check rank using cached dictionary - O(1) lookup
+                merge_idx = self.ranks.get((token1, token2), -1)
+                
+                if merge_idx != -1 and merge_idx < best_score:
+                    best_idx = i
+                    best_score = merge_idx
             
             # 如果没有可合并的对，退出
             if best_idx == -1:
                 break
             
             # 执行合并
-            token1 = bytes([tokens[best_idx]])
-            token2 = bytes([tokens[best_idx + 1]])
+            token1 = tokens[best_idx]
+            token2 = tokens[best_idx + 1]
             merged_token = token1 + token2
             
             # 替换两个 token 为一个合并后的 token
-            new_token_id = self.vocab_r[merged_token]
-            tokens = tokens[:best_idx] + [new_token_id] + tokens[best_idx + 2:]
+            tokens = tokens[:best_idx] + [merged_token] + tokens[best_idx + 2:]
         
-        return tokens
+        return [self.vocab_r[t] for t in tokens]
     
     def encode(self, text: str) -> List[int]:
         """
@@ -210,7 +257,14 @@ class Tokenizer:
             else:
                 # 普通文本：转为字节，然后 BPE 编码
                 text_bytes = pretoken.encode('utf-8')
-                ids = self._encode_bytes(text_bytes)
+                
+                # Check cache
+                if text_bytes in self.cache:
+                    ids = self.cache[text_bytes]
+                else:
+                    ids = self._encode_bytes(text_bytes)
+                    self.cache[text_bytes] = ids
+                
                 token_ids.extend(ids)
         
         return token_ids
@@ -326,20 +380,28 @@ def train_bpe(
     
     # 6. Merge loop
     pbar = tqdm(total=vocab_size - len(vocab))
+    
+    # Pre-calculate pair stats
+    # pairs: (t1, t2) -> count
+    pairs = Counter()
+    # where_pair: (t1, t2) -> set(word_bytes)
+    # This might be memory intensive, but faster than iterating all words
+    where_pair = {} 
+    
+    for wb, count in word_counts.items():
+        split = split_words[wb]
+        for i in range(len(split) - 1):
+            pair = (split[i], split[i+1])
+            pairs[pair] += count
+            if pair not in where_pair:
+                where_pair[pair] = set()
+            where_pair[pair].add(wb)
+            
     while len(vocab) < vocab_size:
-        pairs = {}
-        for wb, count in word_counts.items():
-            split = split_words[wb]
-            if len(split) < 2:
-                continue
-            for i in range(len(split) - 1):
-                pair = (split[i], split[i+1])
-                pairs[pair] = pairs.get(pair, 0) + count
-        
         if not pairs:
             break
             
-        best_pair = max(pairs, key=pairs.get)
+        best_pair = pairs.most_common(1)[0][0]
         
         # Add to merges
         merges.append(best_pair)
@@ -349,12 +411,98 @@ def train_bpe(
         vocab[next_id] = new_token
         next_id += 1
         
-        # Update split_words
-        for wb in split_words:
+        # Update split_words only for words containing the best_pair
+        # And incrementally update pairs stats
+        words_to_update = where_pair.get(best_pair, set()).copy()
+        
+        # We don't need this pair in stats/index anymore
+        del pairs[best_pair]
+        del where_pair[best_pair]
+        
+        for wb in words_to_update:
             split = split_words[wb]
-            if len(split) < 2:
-                continue
+            count = word_counts[wb]
             
+            # Reconstruct the split with the merge applied
+            new_split = []
+            i = 0
+            while i < len(split):
+                if i < len(split) - 1 and split[i] == best_pair[0] and split[i+1] == best_pair[1]:
+                    # Found a merge
+                    
+                    # 1. Decrement counts for broken pairs
+                    # Previous pair: (split[i-1], split[i]) -> broken
+                    if i > 0:
+                        prev_pair = (new_split[-1], split[i])
+                        pairs[prev_pair] -= count
+                        if pairs[prev_pair] <= 0:
+                            del pairs[prev_pair]
+                        if prev_pair in where_pair:
+                            where_pair[prev_pair].discard(wb)
+                            if not where_pair[prev_pair]:
+                                del where_pair[prev_pair]
+                                
+                    # Next pair: (split[i+1], split[i+2]) -> broken
+                    if i < len(split) - 2:
+                        next_pair = (split[i+1], split[i+2])
+                        pairs[next_pair] -= count
+                        if pairs[next_pair] <= 0:
+                            del pairs[next_pair]
+                        if next_pair in where_pair:
+                            where_pair[next_pair].discard(wb)
+                            if not where_pair[next_pair]:
+                                del where_pair[next_pair]
+                    
+                    # 2. Append new token
+                    new_split.append(new_token)
+                    
+                    # 3. Increment counts for new pairs
+                    # New previous pair: (new_split[-2], new_token)
+                    if len(new_split) > 1:
+                        new_prev_pair = (new_split[-2], new_token)
+                        pairs[new_prev_pair] += count
+                        if new_prev_pair not in where_pair:
+                            where_pair[new_prev_pair] = set()
+                        where_pair[new_prev_pair].add(wb)
+                    
+                    # Note: We don't handle "New next pair" here because the next token 
+                    # hasn't been processed yet (it will be handled in the next iteration or as "prev_pair" of the next merge)
+                    # BUT, we need to be careful.
+                    # Actually, it's safer to just rebuild the whole word's pairs
+                    # But that defeats the purpose of incremental updates if we scan the whole word again.
+                    # However, "split" is short (word length). Scanning the whole word is cheap.
+                    # The expensive part is scanning *all* words.
+                    
+                    i += 2
+                else:
+                    new_split.append(split[i])
+                    i += 1
+            
+            # Since we did a complex update logic above which might be error prone for "new next pair",
+            # let's try a simpler approach:
+            # 1. Remove ALL pairs of this word from stats
+            # 2. Update the word split
+            # 3. Add ALL pairs of the new word to stats
+            # This is O(len(word)) which is small.
+            pass
+            
+        # Refined loop for correctness and simplicity
+        for wb in words_to_update:
+            split = split_words[wb]
+            count = word_counts[wb]
+            
+            # 1. Remove old pairs
+            for i in range(len(split) - 1):
+                pair = (split[i], split[i+1])
+                pairs[pair] -= count
+                if pairs[pair] <= 0:
+                    del pairs[pair]
+                if pair in where_pair:
+                    where_pair[pair].discard(wb)
+                    if not where_pair[pair]:
+                        del where_pair[pair]
+            
+            # 2. Update split
             new_split = []
             i = 0
             while i < len(split):
@@ -365,6 +513,14 @@ def train_bpe(
                     new_split.append(split[i])
                     i += 1
             split_words[wb] = new_split
+            
+            # 3. Add new pairs
+            for i in range(len(new_split) - 1):
+                pair = (new_split[i], new_split[i+1])
+                pairs[pair] += count
+                if pair not in where_pair:
+                    where_pair[pair] = set()
+                where_pair[pair].add(wb)
             
         pbar.update(1)
     pbar.close()

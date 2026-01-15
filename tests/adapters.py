@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from sympy import N
+from cs336_basics.model.modules import *
 import os
 from collections.abc import Iterable
 from typing import IO, Any, BinaryIO
@@ -28,8 +30,12 @@ def run_linear(
     Returns:
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
+    linear = Linear(in_features=d_in, out_features=d_out, bias=False)
+    with torch.no_grad():
+        linear.weight.copy_(weights)
+        
+    return linear(in_features)
 
-    raise NotImplementedError
 
 
 def run_embedding(
@@ -50,8 +56,10 @@ def run_embedding(
     Returns:
         Float[Tensor, "... d_model"]: Batch of embeddings returned by your Embedding layer.
     """
-
-    raise NotImplementedError
+    embed = Embedding(vocab_size=vocab_size, embedding_dim=d_model)
+    with torch.no_grad():
+        embed.weight.copy_(weights)
+    return embed(token_ids)
 
 
 def run_swiglu(
@@ -83,7 +91,13 @@ def run_swiglu(
     # swiglu.w1.weight.data = w1_weight
     # swiglu.w2.weight.data = w2_weight
     # swiglu.w3.weight.data = w3_weight
-    raise NotImplementedError
+    swiglu = SwiGLU(d_model=d_model, d_ff=d_ff)
+    with torch.no_grad():
+        swiglu.w1.weight.copy_(w3_weight)
+        swiglu.w2.weight.copy_(w1_weight)
+        swiglu.w3.weight.copy_(w2_weight)
+    
+    return swiglu(in_features)
 
 
 def run_scaled_dot_product_attention(
@@ -104,7 +118,8 @@ def run_scaled_dot_product_attention(
     Returns:
         Float[Tensor, " ... queries d_v"]: Output of SDPA
     """
-    raise NotImplementedError
+    sdpa = scaled_dot_product_attention(q=Q, k=K, v=V, mask=mask)
+    return sdpa
 
 
 def run_multihead_self_attention(
@@ -122,7 +137,6 @@ def run_multihead_self_attention(
     implementation. This implementation should handle the key, query, and value projections
     for all heads in a single matrix multiply.
     This function should not use RoPE.
-    See section 3.2.2 of Vaswani et al., 2017.
 
     Args:
         d_model (int): Dimensionality of the feedforward input and output.
@@ -138,7 +152,13 @@ def run_multihead_self_attention(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    mha = MultiHeadAttention(d_model=d_model, n_heads=num_heads)
+    with torch.no_grad():
+        mha.W_q.weight.copy_(q_proj_weight)
+        mha.W_k.weight.copy_(k_proj_weight)
+        mha.W_v.weight.copy_(v_proj_weight)
+        mha.W_o.weight.copy_(o_proj_weight)
+    return mha(in_features)
 
 
 def run_multihead_self_attention_with_rope(
@@ -178,8 +198,14 @@ def run_multihead_self_attention_with_rope(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    mha_rope = MultiHeadAttention(d_model=d_model, n_heads=num_heads)
+    with torch.no_grad():
+        mha_rope.q_proj.weight.copy_(q_proj_weight)
+        mha_rope.k_proj.weight.copy_(k_proj_weight)
+        mha_rope.v_proj.weight.copy_(v_proj_weight)
+        mha_rope.o_proj.weight.copy_(o_proj_weight)
 
+    return mha_rope(in_features)
 
 def run_rope(
     d_k: int,

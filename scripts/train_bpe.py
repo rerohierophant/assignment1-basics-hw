@@ -1,7 +1,7 @@
 import argparse
 import os
 import json
-from cs336_basics.tokenizer import train_bpe
+from cs336_basics.tokenizer import train_bpe, get_byte_encoder
 
 def main():
     parser = argparse.ArgumentParser(description="Train BPE tokenizer on TinyStories")
@@ -19,16 +19,15 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True) # exist ok意思是如果目录存在则不报错直接保存
     vocab_path = os.path.join(args.output_dir, "vocab.json")
     
-    # Convert vocab to format suitable for JSON and Tokenizer.from_files
-    # We attempt to decode as utf-8. If fail, we use latin-1 
-    # (Note: This might cause issues with non-utf8 bytes when loading back with Tokenizer.from_files 
-    # which assumes utf-8 encoding for strings, but it's the standard simple approach)
+    # Use GPT-2 style byte-to-unicode mapping for serialization
+    byte_encoder = get_byte_encoder()
+    
+    def bytes_to_unicode_str(b_data: bytes) -> str:
+        return "".join([byte_encoder[b] for b in b_data])
+
     vocab_json = {}
     for k, v in vocab.items():
-        try:
-            vocab_json[str(k)] = v.decode('utf-8')
-        except UnicodeDecodeError:
-            vocab_json[str(k)] = v.decode('latin-1')
+        vocab_json[str(k)] = bytes_to_unicode_str(v)
             
     with open(vocab_path, 'w', encoding='utf-8') as f:
         json.dump(vocab_json, f, indent=2, ensure_ascii=False)
@@ -38,14 +37,8 @@ def main():
     with open(merges_path, 'w', encoding='utf-8') as f:
         f.write("# version: 0.2\n")
         for t1, t2 in merges:
-            try:
-                s1 = t1.decode('utf-8')
-            except:
-                s1 = t1.decode('latin-1')
-            try:
-                s2 = t2.decode('utf-8')
-            except:
-                s2 = t2.decode('latin-1')
+            s1 = bytes_to_unicode_str(t1)
+            s2 = bytes_to_unicode_str(t2)
             f.write(f"{s1} {s2}\n")
             
     print(f"Saved vocab to {vocab_path} and merges to {merges_path}")
