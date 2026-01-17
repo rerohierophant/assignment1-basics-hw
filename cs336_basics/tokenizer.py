@@ -401,7 +401,12 @@ def train_bpe(
         if not pairs:
             break
             
-        best_pair = pairs.most_common(1)[0][0]
+        # Tie-breaking: prefer most frequent, then lexicographically greater
+        # pairs.most_common(1) is not deterministic for ties
+        # We need to find all pairs with the max count and pick the best one
+        max_count = max(pairs.values())
+        candidates = [p for p, c in pairs.items() if c == max_count]
+        best_pair = max(candidates)
         
         # Add to merges
         merges.append(best_pair)
@@ -419,73 +424,6 @@ def train_bpe(
         del pairs[best_pair]
         del where_pair[best_pair]
         
-        for wb in words_to_update:
-            split = split_words[wb]
-            count = word_counts[wb]
-            
-            # Reconstruct the split with the merge applied
-            new_split = []
-            i = 0
-            while i < len(split):
-                if i < len(split) - 1 and split[i] == best_pair[0] and split[i+1] == best_pair[1]:
-                    # Found a merge
-                    
-                    # 1. Decrement counts for broken pairs
-                    # Previous pair: (split[i-1], split[i]) -> broken
-                    if i > 0:
-                        prev_pair = (new_split[-1], split[i])
-                        pairs[prev_pair] -= count
-                        if pairs[prev_pair] <= 0:
-                            del pairs[prev_pair]
-                        if prev_pair in where_pair:
-                            where_pair[prev_pair].discard(wb)
-                            if not where_pair[prev_pair]:
-                                del where_pair[prev_pair]
-                                
-                    # Next pair: (split[i+1], split[i+2]) -> broken
-                    if i < len(split) - 2:
-                        next_pair = (split[i+1], split[i+2])
-                        pairs[next_pair] -= count
-                        if pairs[next_pair] <= 0:
-                            del pairs[next_pair]
-                        if next_pair in where_pair:
-                            where_pair[next_pair].discard(wb)
-                            if not where_pair[next_pair]:
-                                del where_pair[next_pair]
-                    
-                    # 2. Append new token
-                    new_split.append(new_token)
-                    
-                    # 3. Increment counts for new pairs
-                    # New previous pair: (new_split[-2], new_token)
-                    if len(new_split) > 1:
-                        new_prev_pair = (new_split[-2], new_token)
-                        pairs[new_prev_pair] += count
-                        if new_prev_pair not in where_pair:
-                            where_pair[new_prev_pair] = set()
-                        where_pair[new_prev_pair].add(wb)
-                    
-                    # Note: We don't handle "New next pair" here because the next token 
-                    # hasn't been processed yet (it will be handled in the next iteration or as "prev_pair" of the next merge)
-                    # BUT, we need to be careful.
-                    # Actually, it's safer to just rebuild the whole word's pairs
-                    # But that defeats the purpose of incremental updates if we scan the whole word again.
-                    # However, "split" is short (word length). Scanning the whole word is cheap.
-                    # The expensive part is scanning *all* words.
-                    
-                    i += 2
-                else:
-                    new_split.append(split[i])
-                    i += 1
-            
-            # Since we did a complex update logic above which might be error prone for "new next pair",
-            # let's try a simpler approach:
-            # 1. Remove ALL pairs of this word from stats
-            # 2. Update the word split
-            # 3. Add ALL pairs of the new word to stats
-            # This is O(len(word)) which is small.
-            pass
-            
         # Refined loop for correctness and simplicity
         for wb in words_to_update:
             split = split_words[wb]

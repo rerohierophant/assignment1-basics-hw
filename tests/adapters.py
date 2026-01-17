@@ -162,10 +162,10 @@ def run_multihead_self_attention(
     """
     mha = MultiHeadAttention(d_model=d_model, n_heads=num_heads)
     with torch.no_grad():
-        mha.W_q.weight.copy_(q_proj_weight)
-        mha.W_k.weight.copy_(k_proj_weight)
-        mha.W_v.weight.copy_(v_proj_weight)
-        mha.W_o.weight.copy_(o_proj_weight)
+        mha.q_proj.weight.copy_(q_proj_weight)
+        mha.k_proj.weight.copy_(k_proj_weight)
+        mha.v_proj.weight.copy_(v_proj_weight)
+        mha.output_proj.weight.copy_(o_proj_weight)
     
     seq_len = in_features.shape[-2]
     mask = torch.tril(torch.ones((seq_len, seq_len), device=in_features.device))
@@ -211,10 +211,10 @@ def run_multihead_self_attention_with_rope(
     """
     mha_rope = MultiHeadAttentionWithRoPE(d_model=d_model, n_heads=num_heads, max_len=max_seq_len, theta=theta)
     with torch.no_grad():
-        mha_rope.W_q.copy_(q_proj_weight)
-        mha_rope.W_k.copy_(k_proj_weight)
-        mha_rope.W_v.copy_(v_proj_weight)
-        mha_rope.W_o.copy_(o_proj_weight)
+        mha_rope.q_proj.weight.copy_(q_proj_weight)
+        mha_rope.k_proj.weight.copy_(k_proj_weight)
+        mha_rope.v_proj.weight.copy_(v_proj_weight)
+        mha_rope.output_proj.weight.copy_(o_proj_weight)
     
     seq_len = in_features.shape[-2]
     mask = torch.tril(torch.ones((seq_len, seq_len), device=in_features.device))
@@ -322,17 +322,17 @@ def run_transformer_block(
     # So we don't need to transpose, just map keys.
     for k, v in weights.items():
         if k == "attn.q_proj.weight":
-            state_dict["attn.W_q.weight"] = v
+            state_dict["attn.q_proj.weight"] = v
         elif k == "attn.k_proj.weight":
-            state_dict["attn.W_k.weight"] = v
+            state_dict["attn.k_proj.weight"] = v
         elif k == "attn.v_proj.weight":
-            state_dict["attn.W_v.weight"] = v
+            state_dict["attn.v_proj.weight"] = v
         elif k == "attn.output_proj.weight":
-            state_dict["attn.W_o.weight"] = v
+            state_dict["attn.output_proj.weight"] = v
         elif k == "ln1.weight":
-            state_dict["norm1.gamma"] = v
+            state_dict["norm1.weight"] = v
         elif k == "ln2.weight":
-            state_dict["norm2.gamma"] = v
+            state_dict["norm2.weight"] = v
         # Mapping Llama-style weights to our SwiGLU implementation
         # Test w1 (Gate) -> My w2
         elif k == "ffn.w1.weight":
@@ -344,13 +344,16 @@ def run_transformer_block(
         elif k == "ffn.w3.weight":
             state_dict["ffn.w1.weight"] = v
 
-    transformer_block.load_state_dict(state_dict) #根据模型的参数匹配权重
+    transformer_block.load_state_dict(state_dict, strict=False) #根据模型的参数匹配权重
     
     # Set to eval mode to avoid any dropout etc (though none in this implementation)
     transformer_block.eval()
     
+    seq_len = in_features.shape[-2]
+    mask = torch.tril(torch.ones((seq_len, seq_len), device=in_features.device))
+
     with torch.no_grad():
-        return transformer_block(in_features)
+        return transformer_block(in_features, mask=mask)
         
 
 
@@ -451,7 +454,7 @@ def run_transformer_lm(
         if k == "token_embeddings.weight":
             state_dict["token_embedding.weight"] = v
         elif k == "ln_final.weight":
-            state_dict["final_norm.gamma"] = v
+            state_dict["final_norm.weight"] = v
         elif k == "lm_head.weight":
             state_dict["lm_head.weight"] = v
             
@@ -465,17 +468,17 @@ def run_transformer_lm(
             # Map suffix similar to transformer block
             new_suffix = None
             if suffix == "attn.q_proj.weight":
-                new_suffix = "attn.W_q.weight"
+                new_suffix = "attn.q_proj.weight"
             elif suffix == "attn.k_proj.weight":
-                new_suffix = "attn.W_k.weight"
+                new_suffix = "attn.k_proj.weight"
             elif suffix == "attn.v_proj.weight":
-                new_suffix = "attn.W_v.weight"
+                new_suffix = "attn.v_proj.weight"
             elif suffix == "attn.output_proj.weight":
-                new_suffix = "attn.W_o.weight"
+                new_suffix = "attn.output_proj.weight"
             elif suffix == "ln1.weight":
-                new_suffix = "norm1.gamma"
+                new_suffix = "norm1.weight"
             elif suffix == "ln2.weight":
-                new_suffix = "norm2.gamma"
+                new_suffix = "norm2.weight"
             # SwiGLU mapping
             elif suffix == "ffn.w1.weight": # Gate
                 new_suffix = "ffn.w2.weight"
@@ -488,7 +491,7 @@ def run_transformer_lm(
                 new_key = f"layers.{layer_idx}.{new_suffix}"
                 state_dict[new_key] = v
 
-    transformer_lm.load_state_dict(state_dict)
+    transformer_lm.load_state_dict(state_dict, strict=False)
 
     transformer_lm.eval()
     
@@ -517,8 +520,8 @@ def run_rmsnorm(
         Float[Tensor,"... d_model"]: Tensor of with the same shape as `in_features` with the output of running
         RMSNorm of the `in_features`.
     """
-    rms = RMSNorm(dim=d_model, eps=eps)
-    rms.gamma = nn.Parameter(weights)
+    rms = RMSNorm(d_model=d_model, eps=eps)
+    rms.weight = nn.Parameter(weights)
     return rms(in_features)
 
 
@@ -608,7 +611,7 @@ def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm:
 
     The gradients of the parameters (parameter.grad) should be modified in-place.
     """
-    run_gradient_clipping(parameters, max_l2_norm)
+    gradient_clipping(parameters, max_l2_norm)
 
 
 def get_adamw_cls() -> Any:
@@ -690,7 +693,7 @@ def run_load_checkpoint(
     Returns:
         int: the previously-serialized number of iterations.
     """
-    load_checkpoint(src, model, optimizer)
+    return load_checkpoint(src, model, optimizer)
 
 
 def get_tokenizer(
@@ -745,4 +748,3 @@ def run_train_bpe(
                 Merges are ordered by order of creation.
     """
     return train_bpe(input_path, vocab_size, special_tokens)
-

@@ -63,14 +63,14 @@ class Softmax(nn.Module):
 
 
 class RMSNorm(nn.Module):
-    def __init__(self, dim, eps=1e-8):
+    def __init__(self, d_model: int, eps: float = 1e-5):
         super().__init__()
         self.eps = eps
-        self.scale = dim**-0.5
-        self.gamma = nn.Parameter(torch.ones(dim)) #可学习参数
+        self.weight = nn.Parameter(torch.ones(d_model))
 
     def forward(self, x):
-        return self.scale * self.gamma * x / (x.norm(2, dim=-1, keepdim=True) + self.eps) # L2范数
+        rms = torch.sqrt(torch.mean(x**2, dim=-1, keepdim=True) + self.eps)
+        return x / rms * self.weight
 
 
 # 激活函数，本质 x * sigmoid(x)
@@ -130,10 +130,10 @@ class MultiHeadAttention(nn.Module):
         assert d_model % n_heads == 0, "d_model must be divisible by n_heads"
         self.d_head = d_model // n_heads
         
-        self.W_q = Linear(d_model, d_model, bias=False)
-        self.W_k = Linear(d_model, d_model, bias=False)
-        self.W_v = Linear(d_model, d_model, bias=False)
-        self.W_o = Linear(d_model, d_model, bias=False)
+        self.q_proj = Linear(d_model, d_model, bias=False)
+        self.k_proj = Linear(d_model, d_model, bias=False)
+        self.v_proj = Linear(d_model, d_model, bias=False)
+        self.output_proj = Linear(d_model, d_model, bias=False)
 
     def _split_heads(self, x):
         # x: (B, L, d_model) -> (B, n_heads, L, d_head)
@@ -154,9 +154,9 @@ class MultiHeadAttention(nn.Module):
             (B, L, d_model)
         """
         # 1. 线性投影 + 分头
-        q = self._split_heads(self.W_q(x))  # (B, n_heads, L, d_head)
-        k = self._split_heads(self.W_k(x))
-        v = self._split_heads(self.W_v(x))
+        q = self._split_heads(self.q_proj(x))  # (B, n_heads, L, d_head)
+        k = self._split_heads(self.k_proj(x))
+        v = self._split_heads(self.v_proj(x))
         
         # 2. 处理 mask 维度
         if mask is not None:
@@ -167,7 +167,7 @@ class MultiHeadAttention(nn.Module):
         attn_output = scaled_dot_product_attention(q, k, v, mask)
         
         # 4. 合并头 + 输出投影
-        return self.W_o(self._merge_heads(attn_output))
+        return self.output_proj(self._merge_heads(attn_output))
 
 # 旋转位置编码：通过旋转变换将位置信息注入到Q/K中
 # 核心思想：将向量按相邻维度配对，对每对应用2D旋转，旋转角度与位置相关
@@ -226,10 +226,10 @@ class MultiHeadAttentionWithRoPE(nn.Module):
         self.d_head = d_model // n_heads
         
         # 投影层
-        self.W_q = Linear(d_model, d_model, bias=False)
-        self.W_k = Linear(d_model, d_model, bias=False)
-        self.W_v = Linear(d_model, d_model, bias=False)
-        self.W_o = Linear(d_model, d_model, bias=False)
+        self.q_proj = Linear(d_model, d_model, bias=False)
+        self.k_proj = Linear(d_model, d_model, bias=False)
+        self.v_proj = Linear(d_model, d_model, bias=False)
+        self.output_proj = Linear(d_model, d_model, bias=False)
         
         # RoPE：注意是对每个head的d_head维度做旋转，支持自定义theta
         self.rope = RotaryPositionEmbedding(self.d_head, max_len, theta)
@@ -260,9 +260,9 @@ class MultiHeadAttentionWithRoPE(nn.Module):
             positions = torch.arange(L, device=x.device)
         
         # 1. 线性投影 + 分头
-        q = self._split_heads(self.W_q(x))  # (B, n_heads, L, d_head)
-        k = self._split_heads(self.W_k(x))
-        v = self._split_heads(self.W_v(x))
+        q = self._split_heads(self.q_proj(x))  # (B, n_heads, L, d_head)
+        k = self._split_heads(self.k_proj(x))
+        v = self._split_heads(self.v_proj(x))
         
         # 2. 对Q和K应用RoPE（关键步骤！）
         q = self.rope(q, positions)
@@ -277,4 +277,4 @@ class MultiHeadAttentionWithRoPE(nn.Module):
         attn_output = scaled_dot_product_attention(q, k, v, mask)
         
         # 5. 合并头 + 输出投影
-        return self.W_o(self._merge_heads(attn_output))
+        return self.output_proj(self._merge_heads(attn_output))

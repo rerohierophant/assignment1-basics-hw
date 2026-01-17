@@ -72,11 +72,11 @@ def get_lr_cosine_schedule(
         return max_learning_rate * it / warmup_iters
         
     # 后余弦阶段（恒定最小学习率）
-    if it > warmup_iters + cosine_cycle_iters:
+    if it >= cosine_cycle_iters:
         return min_learning_rate
         
     # 余弦衰减阶段。预热结束后，学习率按照余弦曲线降低到min lr
-    decay_ratio = (it - warmup_iters) / cosine_cycle_iters
+    decay_ratio = (it - warmup_iters) / (cosine_cycle_iters - warmup_iters)
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
     return min_learning_rate + coeff * (max_learning_rate - min_learning_rate)
 
