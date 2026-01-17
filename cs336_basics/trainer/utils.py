@@ -4,30 +4,27 @@ import math
 from typing import Iterable
 
 def get_batch(
-    dataset: np.ndarray,
+    dataset: np.ndarray, # 数据集，一维token id数组
     batch_size: int,
     context_length: int,
     device: str
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Sample a batch of inputs and targets from the dataset.
+    从数据集中采样输入和目标。随机选batch size个起始索引，往后取context length长度的token
     
     Args:
-        dataset: 1D numpy array of integer token IDs.
-        batch_size: Number of examples in the batch.
-        context_length: Length of each example.
-        device: Device to move the tensors to.
+        dataset: 整数 token ID 的一维 numpy 数组。
+        batch_size: 批次中的样本数量。
+        context_length: 每个样本的长度。
+        device: 将张量移动到的设备。
         
     Returns:
-        x: Input tensor of shape (batch_size, context_length).
-        y: Target tensor of shape (batch_size, context_length).
+        x: 形状为 (batch_size, context_length) 的输入张量。
+        y: 形状为 (batch_size, context_length) 的目标张量。
     """
-    # We need to sample random starting indices such that i + context_length + 1 <= len(dataset)
-    # The valid range for start index i is [0, len(dataset) - context_length - 1]
-    # because we need context_length tokens for x and context_length tokens for y (shifted by 1)
-    # x = dataset[i : i + context_length]
-    # y = dataset[i + 1 : i + context_length + 1]
-    
+    # 我们需要采样随机起始索引，使得 i + context_length + 1 <= len(dataset)
+    # 起始索引 i 的有效范围是 [0, len(dataset) - context_length - 1]
+
     max_start_index = len(dataset) - context_length
     ix = np.random.randint(0, max_start_index, (batch_size,))
     
@@ -36,13 +33,13 @@ def get_batch(
     
     for i in ix:
         x_batch.append(dataset[i : i + context_length])
-        y_batch.append(dataset[i + 1 : i + context_length + 1])
+        y_batch.append(dataset[i + 1 : i + context_length + 1]) #因为是用来预测下一个token
         
     x = torch.from_numpy(np.array(x_batch)).to(torch.long)
-    y = torch.from_numpy(np.array(y_batch)).to(torch.long)
+    y = torch.from_numpy(np.array(y_batch)).to(torch.long) 
     
     if "cuda" in device and not torch.cuda.is_available():
-        # Fallback or error handling if needed, but usually we assume the user knows what they are doing
+        # 如果需要，进行回退或错误处理，但通常我们假设用户知道他们在做什么
         pass
         
     x = x.to(device)
@@ -58,52 +55,52 @@ def get_lr_cosine_schedule(
     cosine_cycle_iters: int,
 ) -> float:
     """
-    Calculate the learning rate at iteration `it` using a cosine schedule with warmup.
+    使用带有预热的余弦调度计算迭代 `it` 时的学习率。
     
     Args:
-        it: Current iteration number.
-        max_learning_rate: Maximum learning rate after warmup.
-        min_learning_rate: Minimum learning rate at the end of the cosine cycle.
-        warmup_iters: Number of iterations for linear warmup.
-        cosine_cycle_iters: Number of iterations for cosine decay.
+        it: 当前迭代次数。
+        max_learning_rate: 预热后的最大学习率。
+        min_learning_rate: 余弦周期结束时的最小学习率。
+        warmup_iters: 线性预热的迭代次数。
+        cosine_cycle_iters: 余弦衰减的迭代次数。
         
     Returns:
-        Current learning rate.
+        当前学习率。
     """
-    # 1. Warmup phase
+    # 预热阶段，学习率线性增加
     if it < warmup_iters:
         return max_learning_rate * it / warmup_iters
         
-    # 2. Post-cosine phase (constant min_learning_rate)
+    # 后余弦阶段（恒定最小学习率）
     if it > warmup_iters + cosine_cycle_iters:
         return min_learning_rate
         
-    # 3. Cosine decay phase
+    # 余弦衰减阶段。预热结束后，学习率按照余弦曲线降低到min lr
     decay_ratio = (it - warmup_iters) / cosine_cycle_iters
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
     return min_learning_rate + coeff * (max_learning_rate - min_learning_rate)
 
 def gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float) -> None:
     """
-    Clip the gradients of the parameters to a maximum L2 norm.
+    将参数的梯度裁剪到最大 L2 范数。防止梯度爆炸
     
     Args:
-        parameters: Iterable of parameters to clip.
-        max_l2_norm: Maximum L2 norm.
+        parameters: 要裁剪的可迭代参数。
+        max_l2_norm: 最大 L2 范数。
     """
-    # Filter out parameters that don't have gradients
+    # 过滤掉没有梯度的参数
     params = [p for p in parameters if p.grad is not None]
     
     if not params:
         return
         
-    # Calculate total norm
+    # 计算总范数
     total_norm = torch.norm(
-        torch.stack([torch.norm(p.grad.detach(), 2) for p in params]), 2
+        torch.stack([torch.norm(p.grad.detach(), 2) for p in params]), 2 #detach从计算图中分离梯度，stack拼成一个向量
     )
     
-    # Clip gradients
+    # 裁剪梯度
     clip_coef = max_l2_norm / (total_norm + 1e-6)
     if clip_coef < 1:
         for p in params:
-            p.grad.detach().mul_(clip_coef)
+            p.grad.detach().mul_(clip_coef) #mul_原地操作，梯度乘以系数
